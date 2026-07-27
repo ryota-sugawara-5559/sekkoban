@@ -773,8 +773,11 @@ function zoomAt(clientX, clientY, newScale){
   scale = newScale;
   applySize();
   renderAll();
-  mapStage.scrollLeft = fx*scale - offsetX;
-  mapStage.scrollTop  = fy*scale - offsetY;
+
+  const maxScrollLeft = Math.max(0, naturalW*scale - mapStage.clientWidth);
+  const maxScrollTop  = Math.max(0, naturalH*scale - mapStage.clientHeight);
+  mapStage.scrollLeft = Math.min(maxScrollLeft, Math.max(0, fx*scale - offsetX));
+  mapStage.scrollTop  = Math.min(maxScrollTop,  Math.max(0, fy*scale - offsetY));
 }
 
 // ---- 駒の生成 ----
@@ -1601,6 +1604,7 @@ window.addEventListener('blur', ()=>{
 let bgPointers = new Map();
 let panLastX=0, panLastY=0;
 let pinchStartDist=0, pinchStartScale=1;
+let pinchCenterX=0, pinchCenterY=0;
 
 mapStage.addEventListener('pointerdown', (e)=>{
   if (e.target.closest('.koma, .ui-overlay')) return;
@@ -1614,6 +1618,11 @@ mapStage.addEventListener('pointerdown', (e)=>{
     const pts = [...bgPointers.values()];
     pinchStartDist = Math.hypot(pts[0].x-pts[1].x, pts[0].y-pts[1].y) || 1;
     pinchStartScale = scale;
+    // 画面(表示範囲)の中心座標は、ピンチ開始時に一度だけ計算して固定する
+    // (ジェスチャー中に毎回re-measureすると、iOSでズレの原因になることがあるため)
+    const r = mapStage.getBoundingClientRect();
+    pinchCenterX = r.left + r.width/2;
+    pinchCenterY = r.top + r.height/2;
   }
 });
 
@@ -1631,10 +1640,7 @@ mapStage.addEventListener('pointermove', (e)=>{
     const pts = [...bgPointers.values()];
     const dist = Math.hypot(pts[0].x-pts[1].x, pts[0].y-pts[1].y);
     // 指の中点ではなく、画面(表示範囲)の中心を基準にズームする(処理を単純化し、飛びを防止)
-    const r = mapStage.getBoundingClientRect();
-    const cx = r.left + r.width/2;
-    const cy = r.top + r.height/2;
-    zoomAt(cx, cy, pinchStartScale * (dist/pinchStartDist));
+    zoomAt(pinchCenterX, pinchCenterY, pinchStartScale * (dist/pinchStartDist));
   }
 });
 
