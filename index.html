@@ -1394,7 +1394,32 @@ setInterval(recordLog, 5*60*1000);
 // ※起動直後のログ記録は、localStorageからの復元が終わった後(mapImg.onload内)で行う
 
 // ---- 駒のドラッグ ----
-let activeDrag = null; // {end: function}
+let activeDrag = null; // {end: function, cancel: function}
+
+// 画面全体で同時に触れているポインタ(指)の数を追跡する。
+// capture フェーズで拾うことで、駒側の e.stopPropagation() の影響を受けずに
+// 「今何本の指が触れているか」を正確に把握できる。
+// これにより、ピンチ操作中に指が駒の上に乗って駒のドラッグと衝突するのを防ぐ。
+let globalActivePointers = 0;
+window.addEventListener('pointerdown', (e)=>{
+  globalActivePointers++;
+  if (globalActivePointers >= 2 && activeDrag && activeDrag.cancel){
+    // 2本目の指が触れた瞬間、進行中の駒ドラッグがあれば中断して元に戻す。
+    // 中断した指(1本目)の情報を、mapStage側のピンチ追跡に引き継ぐ。
+    const info = activeDrag.cancel();
+    if (info && info.pointerId != null && !bgPointers.has(info.pointerId)){
+      bgPointers.set(info.pointerId, {x:info.x, y:info.y});
+      try{ mapStage.setPointerCapture(info.pointerId); }catch(err){}
+    }
+  }
+}, true);
+window.addEventListener('pointerup', ()=>{
+  globalActivePointers = Math.max(0, globalActivePointers - 1);
+}, true);
+window.addEventListener('pointercancel', ()=>{
+  globalActivePointers = Math.max(0, globalActivePointers - 1);
+}, true);
+
 let zCounter = 100; // あとから触った駒を前面に出すためのカウンタ
 
 // ---- 戻る/やり直す(駒の移動操作のみを対象、最大10手) ----
@@ -1463,6 +1488,8 @@ function attachDrag(el){
   let curRot = 0;
   let halfW=0, halfH=0;
   let beforeSnap = null; // Undo用: ドラッグ開始時点の状態
+  let capturedPointerId = null;
+  let lastMoveX=0, lastMoveY=0;
 
   function start(e){
     e.stopPropagation();
@@ -1474,7 +1501,13 @@ function attachDrag(el){
       return;
     }
 
+    // 既に画面上に複数の指(ポインタ)が触れている場合は、ピンチ操作中とみなし
+    // 駒のドラッグは開始しない(ピンチと駒操作が同時に発生して競合するのを防ぐ)
+    if (globalActivePointers >= 2) return;
+
     dragging = true;
+    capturedPointerId = e.pointerId;
+    lastMoveX = e.clientX; lastMoveY = e.clientY;
     try{ el.setPointerCapture(e.pointerId); }catch(err){}
     el.classList.add('dragging');
 
@@ -1497,11 +1530,36 @@ function attachDrag(el){
     dirRefX = e.clientX; dirRefY = e.clientY;
     curRot = state[el.dataset.id].rot;
 
-    activeDrag = { end: endDrag };
+    activeDrag = { end: endDrag, cancel: cancelDrag };
+  }
+
+  // 2本目の指が触れてピンチが始まった場合などに、状態を変えずにドラッグを中断して元の見た目に戻す。
+  // 中断した指の情報(pointerId・最後の座標)を返し、mapStage側のピンチ追跡に引き継げるようにする。
+  function cancelDrag(){
+    if (!dragging) return null;
+    dragging = false;
+    activeDrag = null;
+    el.classList.remove('dragging');
+    const pid = capturedPointerId;
+    if (capturedPointerId !== null){
+      try{ el.releasePointerCapture(capturedPointerId); }catch(err){}
+    }
+    capturedPointerId = null;
+    waitingArea.classList.remove('dragover');
+    el.style.position = '';
+    el.style.left = '';
+    el.style.top = '';
+    el.style.width = '';
+    el.style.transform = '';
+    el.style.zIndex = els[el.dataset.id].__zBase || '';
+    beforeSnap = null;
+    renderKoma(el.dataset.id); // 状態は変えていないので元の位置に描画し直すだけ
+    return { pointerId: pid, x: lastMoveX, y: lastMoveY };
   }
 
   function move(e){
     if (!dragging) return;
+    lastMoveX = e.clientX; lastMoveY = e.clientY;
 
     // 駒の重心(中心)が画面外に出ないようクランプする
     const cx = Math.max(0, Math.min(window.innerWidth,  e.clientX));
@@ -1527,6 +1585,7 @@ function attachDrag(el){
     if (!dragging) return;
     dragging = false;
     activeDrag = null;
+    capturedPointerId = null;
     el.classList.remove('dragging');
     try{ el.releasePointerCapture(e.pointerId); }catch(err){}
     waitingArea.classList.remove('dragover');
