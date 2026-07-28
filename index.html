@@ -1396,29 +1396,34 @@ setInterval(recordLog, 5*60*1000);
 // ---- 駒のドラッグ ----
 let activeDrag = null; // {end: function, cancel: function}
 
-// 画面全体で同時に触れているポインタ(指)の数を追跡する。
-// capture フェーズで拾うことで、駒側の e.stopPropagation() の影響を受けずに
-// 「今何本の指が触れているか」を正確に把握できる。
-// これにより、ピンチ操作中に指が駒の上に乗って駒のドラッグと衝突するのを防ぐ。
-let globalActivePointers = 0;
+// 画面全体で同時に触れている指の「位置」を、要素のターゲットに関係なく直接追跡する。
+// window の capture フェーズで拾うことで、駒側の e.stopPropagation() の影響を受けずに
+// 「今どこに何本の指が触れているか」を正確に把握できる。
+// これにより、ピンチ操作中に指が駒の上に乗っていても正しくピンチとして扱える。
+let gesturePointers = new Map();
+
 window.addEventListener('pointerdown', (e)=>{
-  globalActivePointers++;
-  if (globalActivePointers >= 2 && activeDrag && activeDrag.cancel){
-    // 2本目の指が触れた瞬間、進行中の駒ドラッグがあれば中断して元に戻す。
-    // 中断した指(1本目)の情報を、mapStage側のピンチ追跡に引き継ぐ。
-    const info = activeDrag.cancel();
-    if (info && info.pointerId != null && !bgPointers.has(info.pointerId)){
-      bgPointers.set(info.pointerId, {x:info.x, y:info.y});
-      try{ mapStage.setPointerCapture(info.pointerId); }catch(err){}
-    }
+  gesturePointers.set(e.pointerId, {x:e.clientX, y:e.clientY});
+
+  if (gesturePointers.size === 2){
+    // 2本目の指が触れた瞬間、進行中の駒ドラッグがあれば位置を変えずに中断する
+    if (activeDrag && activeDrag.cancel) activeDrag.cancel();
+
+    const pts = [...gesturePointers.values()];
+    pinchStartDist = Math.hypot(pts[0].x-pts[1].x, pts[0].y-pts[1].y) || 1;
+    pinchStartScale = scale;
+    // 画面(表示範囲)の中心座標は、ピンチ開始時に一度だけ計算して固定する
+    const r = mapStage.getBoundingClientRect();
+    pinchCenterX = r.left + r.width/2;
+    pinchCenterY = r.top + r.height/2;
   }
 }, true);
-window.addEventListener('pointerup', ()=>{
-  globalActivePointers = Math.max(0, globalActivePointers - 1);
-}, true);
-window.addEventListener('pointercancel', ()=>{
-  globalActivePointers = Math.max(0, globalActivePointers - 1);
-}, true);
+
+function endGesturePointer(e){
+  gesturePointers.delete(e.pointerId);
+}
+window.addEventListener('pointerup', endGesturePointer, true);
+window.addEventListener('pointercancel', endGesturePointer, true);
 
 let zCounter = 100; // あとから触った駒を前面に出すためのカウンタ
 
@@ -1503,7 +1508,7 @@ function attachDrag(el){
 
     // 既に画面上に複数の指(ポインタ)が触れている場合は、ピンチ操作中とみなし
     // 駒のドラッグは開始しない(ピンチと駒操作が同時に発生して競合するのを防ぐ)
-    if (globalActivePointers >= 2) return;
+    if (gesturePointers.size >= 2) return;
 
     dragging = true;
     capturedPointerId = e.pointerId;
@@ -1659,63 +1664,55 @@ window.addEventListener('blur', ()=>{
   if (activeDrag) activeDrag.end({clientX:window.innerWidth/2, clientY:window.innerHeight/2, pointerId:0});
 });
 
-// ---- 地図の背景ドラッグでパン + 2本指ピンチでズーム ----
+// ---- 地図の背景ドラッグでパン ----
 let bgPointers = new Map();
 let panLastX=0, panLastY=0;
-let pinchStartDist=0, pinchStartScale=1;
-let pinchCenterX=0, pinchCenterY=0;
 
 mapStage.addEventListener('pointerdown', (e)=>{
   if (e.target.closest('.koma, .ui-overlay')) return;
+  if (gesturePointers.size >= 2) return; // ピンチ中はパン処理を行わない
   try{ mapStage.setPointerCapture(e.pointerId); }catch(err){}
   bgPointers.set(e.pointerId, {x:e.clientX, y:e.clientY});
   mapStage.classList.add('panning');
-
-  if (bgPointers.size === 1){
-    panLastX = e.clientX; panLastY = e.clientY;
-  } else if (bgPointers.size === 2){
-    const pts = [...bgPointers.values()];
-    pinchStartDist = Math.hypot(pts[0].x-pts[1].x, pts[0].y-pts[1].y) || 1;
-    pinchStartScale = scale;
-    // 画面(表示範囲)の中心座標は、ピンチ開始時に一度だけ計算して固定する
-    // (ジェスチャー中に毎回re-measureすると、iOSでズレの原因になることがあるため)
-    const r = mapStage.getBoundingClientRect();
-    pinchCenterX = r.left + r.width/2;
-    pinchCenterY = r.top + r.height/2;
-  }
+  panLastX = e.clientX; panLastY = e.clientY;
 });
 
 mapStage.addEventListener('pointermove', (e)=>{
   if (!bgPointers.has(e.pointerId)) return;
+  if (gesturePointers.size >= 2) return; // ピンチが始まったらパンは行わない
   bgPointers.set(e.pointerId, {x:e.clientX, y:e.clientY});
-
-  if (bgPointers.size === 1){
-    const dx = e.clientX - panLastX;
-    const dy = e.clientY - panLastY;
-    mapStage.scrollLeft -= dx;
-    mapStage.scrollTop  -= dy;
-    panLastX = e.clientX; panLastY = e.clientY;
-  } else if (bgPointers.size === 2){
-    const pts = [...bgPointers.values()];
-    const dist = Math.hypot(pts[0].x-pts[1].x, pts[0].y-pts[1].y);
-    // 指の中点ではなく、画面(表示範囲)の中心を基準にズームする(処理を単純化し、飛びを防止)
-    zoomAt(pinchCenterX, pinchCenterY, pinchStartScale * (dist/pinchStartDist));
-  }
+  const dx = e.clientX - panLastX;
+  const dy = e.clientY - panLastY;
+  mapStage.scrollLeft -= dx;
+  mapStage.scrollTop  -= dy;
+  panLastX = e.clientX; panLastY = e.clientY;
 });
 
 function bgEnd(e){
   if (!bgPointers.has(e.pointerId)) return;
   bgPointers.delete(e.pointerId);
   try{ mapStage.releasePointerCapture(e.pointerId); }catch(err){}
-  if (bgPointers.size === 0){
-    mapStage.classList.remove('panning');
-  } else {
-    const remaining = [...bgPointers.values()][0];
-    panLastX = remaining.x; panLastY = remaining.y;
-  }
+  if (bgPointers.size === 0) mapStage.classList.remove('panning');
 }
 mapStage.addEventListener('pointerup', bgEnd);
 mapStage.addEventListener('pointercancel', bgEnd);
+
+// ---- 2本指ピンチでズーム ----
+// 駒がタッチのターゲットになっていても正しくピンチとして扱えるよう、
+// 個別の要素のターゲットに関係なく、画面に触れている指の位置を直接(window/captureフェーズで)追跡する。
+let pinchStartDist=0, pinchStartScale=1;
+let pinchCenterX=0, pinchCenterY=0;
+
+window.addEventListener('pointermove', (e)=>{
+  if (!gesturePointers.has(e.pointerId)) return;
+  gesturePointers.set(e.pointerId, {x:e.clientX, y:e.clientY});
+  if (gesturePointers.size === 2){
+    const pts = [...gesturePointers.values()];
+    const dist = Math.hypot(pts[0].x-pts[1].x, pts[0].y-pts[1].y);
+    // 指の中点ではなく、画面(表示範囲)の中心を基準にズームする(処理を単純化し、飛びを防止)
+    zoomAt(pinchCenterX, pinchCenterY, pinchStartScale * (dist/pinchStartDist));
+  }
+}, true);
 
 // ---- ズーム: Ctrl+ホイール(マウスポインタ中心) ----
 mapStage.addEventListener('wheel', (e)=>{
